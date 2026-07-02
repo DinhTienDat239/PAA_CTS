@@ -1,0 +1,793 @@
+================================================================================
+        QUY CHUẨN DỰ ÁN CTS (Convert To SDK)  –  Spec for Agents
+              Phiên bản: 1.2.0 | Cập nhật: 2026-05-13
+================================================================================
+
+Tài liệu này là spec đầy đủ giúp 1 agent mới (hoặc lập trình viên mới) có thể:
+  (a) HIỂU đúng kiến trúc + công thức convert của dự án,
+  (b) MỞ RỘNG thêm network mới đúng quy chuẩn,
+  (c) CODE LẠI tool từ con số 0 mà vẫn ra output byte-perfect.
+
+Đọc cùng tài liệu này (theo thứ tự ưu tiên giảm dần):
+  1. công thức convert Mintegra.txt   – Spec chi tiết riêng cho MTG.
+  2. CTS/README.md                    – Hướng dẫn end-user của CTS.
+  3. MTGConverTool/README.md          – Hướng dẫn tool MTG độc lập (cũ).
+  4. ALConvertTool/convert.py         – Source tham chiếu của AL gốc.
+  5. GGConvertTool/main.py            – Source tham chiếu của GG gốc.
+
+
+================================================================================
+0.  THUẬT NGỮ (GLOSSARY)
+================================================================================
+
+  Luna Playable        : 1 file HTML chứa toàn bộ playable ad build bằng Luna
+                          Labs Unity exporter. Thường ~2-3 MB / file.
+  unityads             : "Target platform" mặc định khi build Luna playable.
+                          Là input chuẩn cho mọi luồng convert của dự án.
+  Mintegral / MTG      : Mạng quảng cáo mobile gốc Trung Quốc.
+  AppLovin  / AL       : Mạng quảng cáo MAX của AppLovin.
+  Google    / GG       : Quảng cáo Google (AdSense / AdMob playable).
+  MRAID                : Mobile Rich Media Ad Interface – API chuẩn cho
+                          playable ad trên hầu hết SDK (Unity Ads dùng MRAID).
+  data-startup-only    : Attribute đánh dấu thẻ <script> chỉ chạy khi
+                          playable khởi động. Luna dùng để gom các bundle.
+  bundle               : 1 khối JS chứa data (sounds/jsons/blobs) đã nén bằng
+                          decompressString / decompressArrayBuffer.
+  byte-perfect         : Output trùng KHỚP từng byte với reference (kể cả
+                          line endings, encoding). Đây là yêu cầu BẮT BUỘC
+                          cho mọi network mà dự án hỗ trợ.
+
+
+================================================================================
+1.  CÂY THƯ MỤC WORKSPACE
+================================================================================
+
+  PAA_CTS/                                   ← workspace root
+  ├── Input/Input.html                       ← file playable mẫu (input)
+  ├── Output/                                ← output mẫu của Luna pipeline
+  │   ├── mintegral.html                     ← reference cho MTG
+  │   └── assets/{scripts,jsons,blobs}.js
+  ├── công thức convert Mintegra.txt         ← SPEC riêng cho MTG (đọc kỹ)
+  ├── Quy chuẩn dự án CTS.txt                ← FILE NÀY
+  ├── ALConvertTool/                         ← tool AL độc lập (legacy)
+  │   ├── convert.py                         ← Source TRUTH cho AL logic
+  │   └── dist/convert.exe
+  ├── MTGConverTool/                         ← tool MTG độc lập (legacy)
+  │   ├── src/{mtg_convert_tool,mintegra_converter}.py
+  │   └── dist/MTGConverTool.exe
+  ├── GGConvertTool/                         ← tool GG độc lập (legacy)
+  │   ├── main.py                            ← Source TRUTH cho GG logic
+  │   └── GGConvertTool.exe
+  └── CTS/                                   ← TOOL HIỆN TẠI (tích hợp 5 network)
+      ├── src/
+      │   ├── cts_tool.py                    ← GUI entry point
+      │   ├── al_converter.py                ← Core AL   (port từ ALConvertTool)
+      │   ├── mintegra_converter.py          ← Core MTG  (xem công thức convert Mintegra.txt)
+      │   ├── gg_converter.py                ← Core GG   (port từ GGConvertTool)
+      │   ├── meta_converter.py              ← Core META (Meta / Facebook playable)
+      │   └── mlc_converter.py               ← Core MLC  (Moloco playable)
+      ├── dist/CTS.exe                       ← bản build sẵn (windowed, one-file)
+      ├── build.bat
+      ├── requirements.txt
+      └── README.md
+
+QUY TẮC #1:
+  Mọi spec/công thức/template MỚI luôn được đặt ở workspace root dưới dạng
+  file .txt tiếng Việt. KHÔNG đẩy spec xuống thư mục con của tool.
+
+
+================================================================================
+2.  KIẾN TRÚC TỔNG QUAN
+================================================================================
+
+Tool CTS chia làm 2 LỚP rõ ràng:
+
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  LỚP UI         (cts_tool.py – Tkinter, không chứa logic convert)    │
+  │   - Chọn file input                                                  │
+  │   - Tick network (AL/MTG/GG/...)                                     │
+  │   - Quản lý dependency, thứ tự convert, log realtime                 │
+  │   - Hiển thị tổng kết & mở Output                                    │
+  └──────────────────────────────┬───────────────────────────────────────┘
+                                 │ gọi convert_html()
+                                 ▼
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  LỚP CORE       (al_converter.py, mintegra_converter.py,             │
+  │                  gg_converter.py, ...)                                │
+  │   - Mỗi file = 1 module độc lập, không phụ thuộc GUI                 │
+  │   - Cùng 1 chữ ký hàm: convert_html(input_path, output_dir, log=...) │
+  │   - Có thể chạy CLI để debug: `python xxx_converter.py <input>`      │
+  └──────────────────────────────────────────────────────────────────────┘
+
+QUY TẮC #2 (lớp lang):
+  - GUI KHÔNG được chứa bất kỳ regex hay phép biến đổi HTML nào.
+  - CORE KHÔNG được import tkinter / GUI library.
+  - Mọi log từ core đẩy ngược về GUI qua tham số `log: Callable[[str], None]`.
+
+
+================================================================================
+3.  CONTRACT CỦA 1 CONVERTER MODULE
+================================================================================
+
+Mỗi network X = 1 file `<x>_converter.py` trong `CTS/src/`. File phải tuân
+thủ NGHIÊM NGẶT contract sau:
+
+3.1.  EXPORT BẮT BUỘC
+------------------------------------------------------------------------------
+  • Hàm  `convert_html(input_path, output_dir, log=None, **kwargs) -> Result`
+  • Dataclass  `<X>ConvertResult`  (dùng cho GUI hiển thị log).
+  • (Tuỳ chọn) Exception  `<X>ConvertError(RuntimeError)`  – raise khi
+    input không đủ điều kiện để convert. GUI sẽ bắt riêng exception này
+    để show thông báo người dùng hiểu được.
+
+3.2.  CHỮ KÝ HÀM convert_html
+------------------------------------------------------------------------------
+```python
+def convert_html(
+    input_path: str | os.PathLike,    # file HTML đầu vào
+    output_dir: str | os.PathLike,    # thư mục output (TỰ TẠO nếu thiếu)
+    log: Callable[[str], None] | None = None,
+    # các tham số riêng của network (kwargs) – ví dụ output_filename
+) -> XConvertResult:
+    ...
+```
+
+3.3.  YÊU CẦU HÀNH VI
+------------------------------------------------------------------------------
+  a. PHẢI `output_dir.mkdir(parents=True, exist_ok=True)` trước khi ghi.
+  b. PHẢI gọi `log(msg)` từng bước nếu `log is not None`.
+       - Log đầu vào : "Đọc file input: <path>"
+       - Log từng phép biến đổi: "  + <Mô tả>"
+       - Log đầu ra : "Ghi output: <path> (<size> ký tự)"
+  c. PHẢI trả về `Result` với ít nhất các field:
+       - `output_html_path: Path | None`
+       - `transforms_applied: list[str]`
+       - `warnings: list[str]`
+       - `input_size: int`
+       - `output_html_size: int`
+  d. NẾU input thiếu điều kiện bắt buộc -> raise `<X>ConvertError(msg)`.
+     KHÔNG được nuốt lỗi và trả về Result rỗng.
+  e. PHẢI có khối `if __name__ == '__main__':` cho CLI test, kèm
+     `sys.stdout.reconfigure(encoding='utf-8')` để in tiếng Việt OK trên
+     Windows console.
+
+3.4.  BYTE-PERFECT OUTPUT
+------------------------------------------------------------------------------
+TUYỆT ĐỐI tuân thủ encoding + line ending của tool gốc tương ứng. Tham
+khảo các quy tắc ở mục 6.
+
+
+================================================================================
+4.  CÔNG THỨC CONVERT CHI TIẾT TỪNG NETWORK
+================================================================================
+
+4.1.  NETWORK MTG  (Mintegral)
+------------------------------------------------------------------------------
+INPUT : 1 file HTML Luna Playable build cho `unityads`.
+OUTPUT:
+  output_dir/
+  ├── mintegral.html
+  └── assets/{scripts,jsons,blobs}.js
+LINE  : CRLF (xem mục 6).
+
+>>> Tham khảo SPEC ĐẦY ĐỦ ở file `công thức convert Mintegra.txt` <<<
+
+Tóm tắt 5 phép biến đổi:
+
+  TRANSFORM 1 — Tách 3 bundle `<script data-startup-only>` ra `assets/*.js`:
+     Regex:  /<script data-startup-only>([\s\S]*?)<\/script>/
+     Trong INPUT có TỚI 7 khối khớp regex, nhưng chỉ 3 là bundle thật.
+     Phân loại theo HEAD của body (đã lstrip):
+        • startswith("window.blobs")          -> assets/blobs.js
+        • startswith("window.jsons")          -> assets/jsons.js
+        • startswith("window._compressedAssets")
+              VÀ chứa "_compressedAssets.push"
+              VÀ chứa "decompressString"
+                                              -> assets/scripts.js
+        • Còn lại (startup/spector/brotli/base64) -> GIỮ NGUYÊN inline
+     Khối được tách → thay bằng:
+        <script src="assets/<tên>.js" defer data-startup-only></script>
+     CHÚ Ý quan trọng:
+        - 4 khối "startup-only" còn lại KHÔNG được động đến.
+        - Nếu tách lầm 1 trong 4, output sẽ sai.
+
+  TRANSFORM 2 — Xoá script remote-debug (console.re):
+     Regex:  /<script>\(\(\)=>\{let e=window\.insertYourRemoteDebuggingTokenHere.*?<\/script>/
+     Định vị bằng marker "insertYourRemoteDebuggingTokenHere".
+
+  TRANSFORM 3 — Đổi `targetPlatform:"unityads"` -> `targetPlatform:"mintegral"`.
+     Đúng 1 lần thay thế trong toàn file.
+
+  TRANSFORM 4 — Đơn giản hoá `window.pi.apply(window,[]||[])` -> `window.pi.apply()`.
+
+  TRANSFORM 5 — Thay 2 đoạn SDK adapter MRAID ở cuối <body> bằng template
+     Mintegral. 4 chuỗi template nguyên văn ở `mintegra_converter.py`
+     (hằng MRAID_VIEWABILITY_SCRIPT, MINTEGRAL_LIFECYCLE_SCRIPT,
+     MRAID_INSTALL_SCRIPT, MINTEGRAL_INSTALL_SCRIPT).
+
+Reference byte-perfect:
+   Output/mintegral.html              -> 905.297  bytes
+   Output/assets/scripts.js           -> 1.555.413 bytes
+   Output/assets/jsons.js             -> 331.217  bytes
+   Output/assets/blobs.js             -> 4.416    bytes
+
+
+4.2.  NETWORK AL  (AppLovin)
+------------------------------------------------------------------------------
+INPUT : 1 file HTML Luna Playable (cùng input với MTG).
+OUTPUT:
+  output_dir/<basename_input>_AL.html      (1 file duy nhất, không assets)
+LINE  : CRLF.
+
+3 bước biến đổi (port nguyên văn từ `ALConvertTool/convert.py`):
+
+  BƯỚC 1 — Quét toàn bộ `<script>...</script>` (regex DOTALL, IGNORECASE):
+     Regex:  /<script\b[^>]*>.*?<\/script>/is
+     XOÁ 2 loại script:
+        a. Chứa chuỗi "insertYourRemoteDebugging"            (count_debug++)
+        b. Có attribute "data-startup-only" VÀ tồn tại
+           URL match `https?://` (case-insensitive)          (count_cdn++)
+     ĐIỀU KIỆN BẮT BUỘC (giống tool gốc):
+        count_debug ≥ 1 AND count_cdn ≥ 1
+        Nếu vi phạm → raise ALConvertError(...) - KHÔNG ghi output.
+
+  BƯỚC 2 — Strip URL hard-coded khắp file (5 phép replace tuần tự):
+     1. "link"            -> ""
+     2. 'link'            -> ''
+     3. "https?://..."    -> ""        (re.IGNORECASE)
+     4. 'https?://...'    -> ''        (re.IGNORECASE)
+     5. href="..."        -> href=""   (re.IGNORECASE, áp dụng cho cả ')
+
+  BƯỚC 3 — Ghi `<input.stem>_AL.html` vào output_dir.
+     Encoding UTF-8, line endings CRLF (xem mục 6).
+
+
+4.3.  NETWORK GG  (Google)
+------------------------------------------------------------------------------
+INPUT : KHÔNG phải file HTML gốc. Phải là `mintegral.html` (output của MTG).
+OUTPUT:
+  output_dir/
+  ├── index.html                                  (đổi từ mintegral.html)
+  └── assets/{scripts,jsons,blobs}.js             (COPY y nguyên từ MTG)
+LINE  : CRLF.
+
+DEPENDENCY:
+  GG phụ thuộc MTG. Cấu hình ở `cts_tool.py`:
+     NETWORK_DEPENDENCIES = {'GG': ['MTG']}
+     NETWORK_ORDER        = ['AL', 'MTG', 'GG']   ← MTG luôn chạy trước GG
+  Khi user tick GG mà chưa tick MTG → auto-tick MTG (trace BooleanVar).
+  Khi MTG fail → GG raise GGConvertError("Thiếu output MTG…").
+
+2 bước biến đổi (port nguyên văn từ `GGConvertTool/main.py`):
+
+  BƯỚC 1 — Đổi `targetPlatform:"mintegral"` -> `targetPlatform:"google"`.
+     Đếm số lần xuất hiện. Nếu = 0 → raise GGConvertError.
+     Thay đúng 1 lần (lần đầu tiên).
+
+  BƯỚC 2 — Thay 2 thẻ `<script>` CUỐI CÙNG bằng 2 template Google:
+     Regex tìm:  /<script\b[^>]*>.*?<\/script>/is
+     matches = tất cả match → lấy `matches[-1]` (cuối) và `matches[-2]` (kế cuối).
+     PHẢI thay từ CUỐI lên trên (last trước, second-last sau) để span index
+     của second-last vẫn còn hợp lệ.
+
+     Template thay (lấy NGUYÊN VĂN từ `gg_converter.py`):
+        NEW_SCRIPT_1 (thay second-last):
+           '<script>window.addEventListener("DOMContentLoaded", (() => {
+             window.devicePixelRatio = 2 })), window.addEventListener(
+             "luna:build", (function () { window.pi.logLoaded(),
+             window.dispatchEvent(new Event("luna:start")) }))</script>'
+        NEW_SCRIPT_2 (thay last) – CHÚ Ý có 2 dấu cách đầu chuỗi:
+           '  <script>window.addEventListener("luna:build", (() => {
+             Bridge.ready((() => { Luna.Unity.Playable.InstallFullGame =
+             function () { window.ExitApi.exit() } })) }))</script>'
+
+     Nếu tổng số `<script>` < 2 → raise GGConvertError.
+
+  BƯỚC 3 — Ghi `index.html` vào output_dir. KHÔNG đổi tên / xoá input như
+     GG tool gốc (vì input của ta nằm ở folder MTG khác, không nên đụng).
+
+  BƯỚC 4 (do GUI làm, không phải core) — Copy `assets/` từ MTG sang GG:
+       shutil.copytree(mtg_assets_dir, output_dir / 'assets')
+     Có thể delete dst_assets trước nếu đã tồn tại (idempotent).
+
+Reference byte-perfect:
+   GG tool gốc chạy trên Output/mintegral.html → index.html = 904.949 bytes.
+
+
+4.4.  NETWORK META  (Meta / Facebook)
+------------------------------------------------------------------------------
+INPUT : 1 file HTML Luna Playable (cùng input với AL/MTG, build "unityads").
+OUTPUT:
+  output_dir/<basename_input>_Meta.html      (1 file duy nhất, không assets)
+LINE  : CRLF.
+DEPENDENCY: không.
+
+3 bước biến đổi (đặc tả nguyên gốc từ user – không có tool legacy):
+
+  BƯỚC 1 — Đổi targetPlatform "unityads" -> "facebook".
+     html.replace('targetPlatform:"unityads"', 'targetPlatform:"facebook"', 1)
+     Bắt buộc tìm thấy ≥ 1 match. Nếu 0 → raise MetaConvertError.
+
+  BƯỚC 2 — Clean window.pi.apply(<bất kỳ args>) -> window.pi.apply().
+     Regex:  /window\.pi\.apply\([^)]*\)/g  -> 'window.pi.apply()'
+     Lý do dùng regex thay vì string compare: input có thể chứa biến thể
+     `window.pi.apply(window,[]||[])` HOẶC `window.pi.apply()` rồi. Cả 2 đều
+     được normalize về `window.pi.apply()`.
+
+  BƯỚC 3 — Xoá 2 thẻ <script> cuối + thay bằng 1 template FACEBOOK_SCRIPT:
+     Regex tìm:  /<script\b[^>]*>.*?</script>/is
+     matches = tất cả match → lấy `matches[-1]` (cuối) và `matches[-2]` (kế cuối).
+     Thay bằng:
+        html[: matches[-2].start()] + FACEBOOK_SCRIPT + html[matches[-1].end():]
+     (Gộp cả vùng giữa 2 script + cả 2 script thành 1 template duy nhất.)
+     Bắt buộc len(matches) >= 2, nếu không → raise MetaConvertError.
+
+     FACEBOOK_SCRIPT (lấy NGUYÊN VĂN từ `meta_converter.py`):
+        <script>window.addEventListener("luna:build",(()=>{Bridge.ready((()=>{
+        Luna.Unity.Playable.InstallFullGame=function(){
+        "undefined"!=typeof FbPlayableAd?FbPlayableAd.onCTAClick():
+        (console.warn("FbPlayableAd is not defined"),
+        window.open(window.$environment.packageConfig.iosLink||
+        window.$environment.packageConfig.androidLink,"_blank"))}}))})),
+        window.addEventListener("open_ctalink",(()=>{FbPlayableAd.onCTAClick()})),
+        window.addEventListener("luna:build",(()=>{window.pi.logLoaded(),
+        window.dispatchEvent(new Event("luna:start"))}))</script>
+
+  BƯỚC 4 — Ghi `<input.stem>_Meta.html` vào output_dir (UTF-8 no BOM, CRLF).
+
+CHÚ Ý:
+  • META KHÔNG xoá script remote-debug (`insertYourRemoteDebuggingTokenHere`).
+    Spec hiện tại chỉ có 3 phép biến đổi ở trên, remote-debug giữ nguyên.
+  • Output KHÔNG yêu cầu byte-perfect với tool nào (chưa có reference).
+    Chỉ cần kiểm tra checklist ở mục 4.5 phía dưới.
+
+
+4.5.  NETWORK MLC  (Moloco)
+------------------------------------------------------------------------------
+INPUT : 1 file HTML Luna Playable (cùng input với AL/MTG, build "unityads").
+OUTPUT:
+  output_dir/<basename_input>_MLC.html       (1 file duy nhất, không assets)
+LINE  : CRLF.
+DEPENDENCY: không.
+
+3 bước biến đổi (giống y hệt META, chỉ khác 2 chỗ):
+
+  BƯỚC 1 — Đổi targetPlatform "unityads" -> "moloco".
+     (META: "facebook"; MLC: "moloco". Còn lại giống META.)
+
+  BƯỚC 2 — Clean window.pi.apply(...) -> window.pi.apply().
+     Giống y META.
+
+  BƯỚC 3 — Xoá 2 thẻ <script> cuối + thay bằng FACEBOOK_SCRIPT (cùng template
+     với META). Đúng vậy – MLC dùng CHUNG template FbPlayableAd với META theo
+     spec user cung cấp.
+
+  BƯỚC 4 — Ghi `<input.stem>_MLC.html` vào output_dir.
+
+
+4.6.  CHECKLIST KIỂM TRA SAU CONVERT (META & MLC)
+------------------------------------------------------------------------------
+  [ ]  Output là 1 file `<basename>_Meta.html` hoặc `<basename>_MLC.html`.
+  [ ]  Encoding UTF-8 không BOM. Line ending toàn CRLF (không Lone LF).
+  [ ]  KHÔNG còn chuỗi `targetPlatform:"unityads"`.
+  [ ]  Có đúng 1 chuỗi `targetPlatform:"facebook"` (META) hoặc
+       `targetPlatform:"moloco"` (MLC).
+  [ ]  KHÔNG còn `window.pi.apply(window,[]||[])` hay bất kỳ args nào.
+  [ ]  Có ≥ 1 `window.pi.apply()` (rỗng).
+  [ ]  Có chuỗi `FbPlayableAd.onCTAClick`.
+  [ ]  Có chuỗi `"open_ctalink"`.
+  [ ]  KHÔNG còn `mraid.isViewable` (2 script MRAID cuối đã bị thay).
+  [ ]  Size lệch giữa META vs MLC = 2 bytes ("facebook"=8 vs "moloco"=6).
+
+Tham khảo size thực tế khi chạy trên Input/Input.html (2.798.161 chars):
+   META :  Input_Meta.html  -> 2.797.316 bytes (CRLF)
+   MLC  :  Input_MLC.html   -> 2.797.314 bytes (CRLF)
+
+
+================================================================================
+5.  QUY CHUẨN ENCODING & LINE-ENDING (BYTE-PERFECT)
+================================================================================
+
+5.1.  Bảng line-ending cho TỪNG converter
+------------------------------------------------------------------------------
+
+  Converter   | Read input          | Write output
+  ------------+---------------------+--------------------------------------
+  MTG         | newline=''  (giữ)   | CRLF (normalize \n -> \r\n)
+  AL          | default (universal) | CRLF (normalize \n -> \r\n)
+  GG          | default (universal) | CRLF (normalize \n -> \r\n)
+  META        | default (universal) | CRLF (normalize \n -> \r\n)
+  MLC         | default (universal) | CRLF (normalize \n -> \r\n)
+  Assets *.js | n/a (string trong RAM) | newline='' (không newline – body
+                                          gốc không có line break)
+
+5.2.  Kỹ thuật write CRLF byte-perfect
+------------------------------------------------------------------------------
+```python
+content_out = content.replace('\r\n', '\n').replace('\n', '\r\n')
+with output_html.open('wb') as f:        # binary write
+    f.write(content_out.encode('utf-8')) # UTF-8 no BOM
+```
+LÝ DO 2 bước replace: nếu chuỗi đã có '\r\n' rồi (do input đã CRLF), bước
+thứ 2 KHÔNG được biến nó thành '\r\r\n'. Vì vậy chuẩn hoá về '\n' trước.
+
+5.3.  Encoding
+------------------------------------------------------------------------------
+  • Mọi file source code = UTF-8 (không BOM).
+  • Mọi file HTML/JS output = UTF-8 (không BOM).
+  • Tuyệt đối KHÔNG dùng `encoding='latin-1'` để decode input "cho chắc",
+    trừ block fallback trong GG (đã có sẵn theo logic tool gốc).
+
+
+================================================================================
+6.  QUY CHUẨN GUI (cts_tool.py)
+================================================================================
+
+6.1.  Cấu hình network – ĐỘC NHẤT 3 BIẾN
+------------------------------------------------------------------------------
+```python
+NETWORKS: list[tuple[str, str]] = [
+    ('AL',   'AppLovin (...)'),
+    ('MTG',  'Mintegral (...)'),
+    ('GG',   'Google (...)'),
+    ('META', 'Meta / Facebook (...)'),
+    ('MLC',  'Moloco (...)'),
+    # ('XX', 'mô tả network mới'),  ← thêm vào đây
+]
+
+NETWORK_DEPENDENCIES: dict[str, list[str]] = {
+    'GG': ['MTG'],
+    # 'YY': ['MTG'], ...
+}
+
+NETWORK_ORDER: list[str] = ['AL', 'MTG', 'GG', 'META', 'MLC']   # thứ tự thực thi
+```
+
+Quy tắc:
+  • Mọi mục trong NETWORKS đều phải có entry tương ứng trong NETWORK_ORDER.
+  • Mục có dependency phải đứng SAU dependency của nó trong NETWORK_ORDER.
+  • Tên key 2-3 ký tự viết HOA (AL, MTG, GG, IS, VG, ...).
+
+6.2.  UI Layout (giữ NGUYÊN, không đổi)
+------------------------------------------------------------------------------
+  ┌─────────────────────────────────────────────────────┐
+  │  Header: "CTS Convert Tool"            v1.x.x       │
+  │  Description (1-2 dòng, wraplength=780)             │
+  │  ─────────────────────────────────────────────────  │
+  │  [readonly path]                  [Chọn file HTML…]│
+  │  ┌── LabelFrame "Chọn network để convert" ──────┐  │
+  │  │  ☑ AL  — ...                                  │  │
+  │  │  ☑ MTG — ...                                  │  │
+  │  │  ☑ GG  — ... (tick GG sẽ tự tick MTG)         │  │
+  │  └───────────────────────────────────────────────┘  │
+  │  [Convert]  [Mở thư mục output]      [Xoá log]     │
+  │  ┌── LabelFrame "Log" ─────────────────────────────┐│
+  │  │ (Text dark theme #1e1e1e fg #dcdcdc, Consolas) ││
+  │  └─────────────────────────────────────────────────┘│
+  │  [Status bar: "Sẵn sàng"]                            │
+  └─────────────────────────────────────────────────────┘
+
+  Font  : Segoe UI cho UI, Consolas 9 cho log.
+  Theme : Log box dark (#1e1e1e / #dcdcdc).
+  Size  : geometry 820x600, minsize 700x480.
+
+6.3.  Thread model & log
+------------------------------------------------------------------------------
+  • Convert chạy trong `threading.Thread(..., daemon=True)`.
+  • Log từ thread → `self._log(msg)` dùng `self.after(0, ...)` để post lên
+    UI thread an toàn.
+  • Mọi đổi state của widget (`btn_convert`, `btn_open_out`, `status_var`)
+    cũng phải qua `self.after(0, ...)`.
+
+6.4.  Convention log
+------------------------------------------------------------------------------
+  • Header section: `=== [<NET>] bắt đầu ===` / `=== [<NET>] hoàn tất ===`
+  • Bullet áp dụng:    `  ✓ <transform>`
+  • Bullet cảnh báo:   `  ! <warning>`
+  • Bullet phụ:        `    + <chi tiết>`
+  • Lỗi:               `!! [<NET>] LỖI: <msg>`
+  • Tổng kết:          `================ TỔNG KẾT ================`
+
+6.5.  Output folder convention
+------------------------------------------------------------------------------
+  `<input_dir>/Output/<NET>/...`
+  Mỗi network 1 subfolder dùng key chữ hoa làm tên folder.
+  Mở Output bằng `os.startfile()` (Windows), `open` (macOS), `xdg-open` (Linux).
+
+
+================================================================================
+7.  CHECKLIST – THÊM NETWORK MỚI (vd. "XX")
+================================================================================
+
+Đây là quy trình CHUẨN khi cần thêm 1 network. Làm tuần tự, không bỏ bước.
+
+  [B0] Có sẵn:
+       • File source TRUTH (vd. legacy tool `XXConvertTool/main.py`).
+       • File reference output để so byte-perfect.
+
+  [B1] Tạo `CTS/src/xx_converter.py`:
+       • Copy template chữ ký từ `al_converter.py` hoặc `gg_converter.py`.
+       • Export: convert_html(...), XXConvertResult, (tuỳ chọn) XXConvertError.
+       • Tuân thủ mục 3 (Contract) và mục 5 (Encoding/Line-ending).
+       • Để các chuỗi template / regex ra HẰNG SỐ ở đầu file, comment rõ
+         "lấy nguyên văn từ <legacy>".
+
+  [B2] Test CLI byte-perfect:
+       ```powershell
+       python CTS\src\xx_converter.py "Input\Input.html" "CTS\test_xx_new"
+       python -c "import filecmp; print(filecmp.cmp('reference.html','CTS/test_xx_new/...'))"
+       ```
+       Bắt buộc `True`. Nếu False:
+         • So sánh bytes bằng PowerShell `[IO.File]::ReadAllBytes`.
+         • Tìm vị trí byte đầu tiên khác – thường là CRLF/LF.
+
+  [B3] Thêm network vào `cts_tool.py`:
+       • Bổ sung tuple ('XX', 'mô tả') vào NETWORKS.
+       • Bổ sung 'XX' vào NETWORK_ORDER ĐÚNG VỊ TRÍ (sau dependency).
+       • Nếu phụ thuộc network khác: thêm vào NETWORK_DEPENDENCIES.
+       • Import: `from xx_converter import convert_html as xx_convert,
+                  XXConvertError`.
+       • Thêm nhánh `elif key == 'XX':` trong `_run_convert(...)`.
+       • Viết hàm `_log_xx_result(res)` (giống `_log_mtg_result`).
+       • Nếu cần copy artifact từ network khác (như GG copy assets từ MTG):
+         thực hiện trong nhánh `elif` của `_run_convert`, không trong core.
+
+  [B4] Update tài liệu:
+       • Thêm mô tả XX vào mục 4 file này.
+       • Update `CTS/README.md` (mô tả + cây thư mục output).
+       • Nếu XX có công thức phức tạp: tạo file
+         `công thức convert <Tên>.txt` ở workspace root.
+
+  [B5] Bump version:
+       • `cts_tool.py`:  APP_VERSION = '1.<minor+1>.0'
+       • Cập nhật trên đầu file Quy chuẩn này.
+
+  [B6] Rebuild:
+       ```powershell
+       cd CTS
+       .\build.bat
+       ```
+       Verify `dist/CTS.exe` smoke-test (mở cửa sổ không crash).
+
+  [B7] Commit (nếu repo git):
+       Mỗi network 1 commit, message: `feat(cts): thêm network <X>`.
+
+
+================================================================================
+8.  QUY CHUẨN BUILD & DISTRIBUTION
+================================================================================
+
+8.1.  PyInstaller flags BẮT BUỘC
+------------------------------------------------------------------------------
+```
+python -m PyInstaller ^
+    --noconfirm ^                ← không hỏi y/n
+    --onefile ^                  ← 1 file .exe duy nhất (~11.5 MB)
+    --windowed ^                 ← KHÔNG console (tránh DOS box khi click)
+    --name "CTS" ^
+    --paths "src" ^              ← để PyInstaller resolve xx_converter modules
+    "src\cts_tool.py"
+```
+KHÔNG đổi `--onefile` thành `--onedir` trừ khi user yêu cầu.
+KHÔNG dùng `console=True`.
+
+8.2.  Clean trước khi build
+------------------------------------------------------------------------------
+Xoá 3 thứ:
+  • build/
+  • dist/
+  • CTS.spec
+  • src/__pycache__/   (xoá sau build để workspace sạch)
+
+8.3.  Bản phân phối cuối cùng
+------------------------------------------------------------------------------
+  CTS/
+  ├── src/...
+  ├── dist/CTS.exe        ← file user double-click (Windows)
+  ├── dist/CTS.app        ← app bundle (macOS)
+  ├── build.bat           ← build .exe (Windows)
+  ├── build_mac.sh        ← build .app (macOS)
+  ├── requirements.txt
+  └── README.md
+KHÔNG để folder `build/`, file `*.spec`, hay `__pycache__/` trong bản
+phân phối.
+
+8.4.  Build cho macOS (.app)
+------------------------------------------------------------------------------
+RÀNG BUỘC: PyInstaller KHÔNG cross-compile. `.app`/`.dmg` BẮT BUỘC build trên
+macOS (máy Mac thật hoặc CI runner macOS). Không thể build từ Windows.
+
+PyInstaller flags cho macOS (trong `build_mac.sh`):
+```
+python3 -m PyInstaller \
+    --noconfirm \
+    --windowed \                 ← sinh .app bundle
+    --name "CTS" \
+    --paths "src" \
+    --osx-bundle-identifier "com.paa.cts" \
+    "src/cts_tool.py"
+```
+KHÁC với Windows:
+  • KHÔNG dùng `--onefile` trên macOS. Bundle `.app` đã là 1 gói thư mục;
+    `--onefile` làm chậm khởi động + dễ lỗi Tkinter trên macOS.
+  • Thêm `--osx-bundle-identifier` để macOS nhận diện app.
+
+Lưu ý runtime macOS:
+  • Nên dùng Python từ python.org (Tcl/Tk mới) để Tkinter hiển thị đẹp.
+  • App chưa code-sign sẽ bị Gatekeeper chặn: chuột phải -> Open lần đầu.
+    Muốn phân phối mượt cần Apple Developer ID để ký + notarize.
+  • Code convert đã cross-platform (mục _open_output đã xử lý win/darwin/linux),
+    KHÔNG cần sửa core khi build macOS.
+
+8.5.  CI build tự động (GitHub Actions) – build khi không có máy Mac
+------------------------------------------------------------------------------
+File `.github/workflows/build.yml` build song song 2 nền tảng:
+  • Job `windows-build` (runner windows-latest): chạy `build.bat` -> CTS.exe.
+  • Job `macos-build`   (runner macos-14, arm64): chạy `build_mac.sh` -> CTS.app.
+Kết quả tải ở tab Actions -> Artifacts:
+  • CTS-windows-exe  (CTS.exe)
+  • CTS-macos-app    (CTS.app)
+Trigger: push nhánh main/master, tag v*, hoặc bấm tay (workflow_dispatch).
+
+
+================================================================================
+9.  QUY CHUẨN CODE STYLE
+================================================================================
+
+9.1.  Python
+------------------------------------------------------------------------------
+  • Python >= 3.10  (dùng union type `str | None`, match-case nếu cần).
+  • `from __future__ import annotations` ở mọi file core (cho phép
+    type hint forward-ref).
+  • Import order: stdlib → 3rd-party → local. Cách nhau 1 dòng trống.
+  • Type hints ở mọi public function.
+  • Docstring tiếng Việt cho mọi module + public function.
+  • Comment tiếng Việt OK, nhưng tránh emoji trong code.
+  • Dùng `pathlib.Path` thay cho `os.path.join`.
+  • Không bắt `except Exception:` trống — luôn log msg.
+  • String constant template ĐẶT ĐẦU FILE dưới dạng UPPER_CASE.
+
+9.2.  GUI
+------------------------------------------------------------------------------
+  • Dùng `ttk.*` thay cho `tk.*` khi có thể (look native hơn).
+  • Mọi callback chạy I/O nặng → thread, log qua `after(0, ...)`.
+  • Không dùng `messagebox.showinfo` trong vòng lặp; chỉ 1 popup tổng kết.
+
+9.3.  Tài liệu .txt (spec/công thức)
+------------------------------------------------------------------------------
+  • Tiếng Việt, dấu đầy đủ, không emoji.
+  • Header với khung "===…===" (80 cột).
+  • Mỗi section đánh số La Mã hoặc Arab rõ ràng.
+  • Mở đầu = tóm tắt + index, kết thúc = HẾT.
+
+
+================================================================================
+10.  CÁC ANTI-PATTERN PHẢI TRÁNH
+================================================================================
+
+  ✗ Đụng vào 4 khối `<script data-startup-only>` KHÔNG phải bundle
+    (startup/spector/brotli/base64) khi convert MTG. Phải để inline.
+  ✗ Dùng regex tham lam `<script.*</script>` (greedy) – bắt cả file. Luôn
+    dùng `.*?` non-greedy + flag `re.DOTALL`.
+  ✗ Write file output bằng `Path.write_text()` mặc định (Python sẽ
+    translate LF nửa-vời, không byte-perfect). Luôn dùng `open('wb')`
+    với binary để kiểm soát chính xác line ending.
+  ✗ Hard-code đường dẫn tuyệt đối (vd. C:\Users\...). Luôn dùng relative
+    path qua `Path(__file__).resolve().parent`.
+  ✗ Chạy convert đồng bộ trên UI thread → app sẽ "Not Responding" 5–10 giây.
+    Bắt buộc dùng thread.
+  ✗ Để file `_test_*.py` lẫn trong `src/` khi build .exe (PyInstaller sẽ
+    cố gắng đóng gói). Xoá trước build hoặc đặt ngoài `src/`.
+  ✗ Bỏ qua `<X>ConvertError` ở GUI – luôn `except` riêng để báo lỗi
+    người dùng-friendly.
+  ✗ Đổi tên file output sang `<network>.html` mà không có lý do (mỗi
+    network có convention riêng do tool gốc đặt ra):
+      AL   : <basename>_AL.html
+      MTG  : mintegral.html
+      GG   : index.html
+      META : <basename>_Meta.html
+      MLC  : <basename>_MLC.html
+  ✗ Sửa core converter để xoá / di chuyển file input (GG tool gốc có
+    behavior này nhưng đã được loại bỏ trong CTS – KHÔNG khôi phục lại).
+
+
+================================================================================
+11.  HƯỚNG DẪN TEST & VERIFY
+================================================================================
+
+11.1.  Smoke test CLI từng converter
+------------------------------------------------------------------------------
+```powershell
+# MTG
+python CTS\src\mintegra_converter.py "Input\Input.html" "CTS\_test\MTG"
+# AL
+python CTS\src\al_converter.py        "Input\Input.html" "CTS\_test\AL"
+# GG (input phải là mintegral.html)
+python CTS\src\gg_converter.py "CTS\_test\MTG\mintegral.html" "CTS\_test\GG"
+# META
+python CTS\src\meta_converter.py      "Input\Input.html" "CTS\_test\META"
+# MLC
+python CTS\src\mlc_converter.py       "Input\Input.html" "CTS\_test\MLC"
+```
+
+11.2.  Verify byte-perfect
+------------------------------------------------------------------------------
+```python
+import filecmp
+assert filecmp.cmp('Output/mintegral.html', 'CTS/_test/MTG/mintegral.html',
+                   shallow=False)
+```
+
+Nếu False, debug:
+```powershell
+$r = [IO.File]::ReadAllBytes('Output\mintegral.html')
+$n = [IO.File]::ReadAllBytes('CTS\_test\MTG\mintegral.html')
+"REF: $($r.Length)  NEW: $($n.Length)"
+for ($i = 0; $i -lt [Math]::Min($r.Length, $n.Length); $i++) {
+    if ($r[$i] -ne $n[$i]) { "diff @ byte $i  REF=$($r[$i])  NEW=$($n[$i])"; break }
+}
+```
+
+11.3.  Smoke test .exe
+------------------------------------------------------------------------------
+```powershell
+$p = Start-Process -FilePath "CTS\dist\CTS.exe" -PassThru
+Start-Sleep -Seconds 3
+if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) {
+    "OK"; Stop-Process -Id $p.Id -Force
+} else { "CRASHED" }
+```
+Bắt buộc "OK".
+
+
+================================================================================
+12.  REFERENCE INPUT/OUTPUT (file mẫu để regression test)
+================================================================================
+
+INPUT mẫu:
+  Input/Input.html
+    - Encoding : UTF-8 (no BOM)
+    - Lines    : 7 (chỉ có '\n', không có '\r')
+    - Size     : 2.798.175 bytes
+    - 7 khối <script data-startup-only>, trong đó CHỈ 3 là bundle thật.
+
+OUTPUT mẫu MTG (reference):
+  Output/mintegral.html
+    - Encoding : UTF-8
+    - Lines    : 7 (CRLF)
+    - Size     : 905.297 bytes
+  Output/assets/scripts.js  : 1.555.413 bytes
+  Output/assets/jsons.js    :   331.217 bytes
+  Output/assets/blobs.js    :     4.416 bytes
+
+OUTPUT mẫu AL (chạy từ tool gốc, dùng làm reference):
+  <Input>_AL.html  : 2.794.117 bytes (CRLF)
+
+OUTPUT mẫu GG (chạy GG tool gốc trên Output/mintegral.html, dùng làm reference):
+  index.html  : 904.949 bytes (CRLF)
+
+OUTPUT mẫu META (chạy meta_converter trên Input/Input.html):
+  Input_Meta.html : 2.797.316 bytes (CRLF, UTF-8 no BOM)
+  - Không có byte-perfect reference (chưa có tool legacy đối chiếu).
+  - Kiểm tra bằng checklist ở mục 4.6.
+
+OUTPUT mẫu MLC (chạy mlc_converter trên Input/Input.html):
+  Input_MLC.html  : 2.797.314 bytes (CRLF, UTF-8 no BOM)
+  - Chênh lệch -2 bytes so với META do "facebook"(8) vs "moloco"(6).
+
+
+================================================================================
+13.  MỞ RỘNG SAU NÀY – Ý TƯỞNG
+================================================================================
+
+  • Thêm flag CLI `--network MTG,GG` để bypass GUI (CI/CD pipeline).
+  • Thêm progressbar trong GUI khi convert (đặc biệt cho MTG vì file lớn).
+  • Cho phép drag-and-drop file HTML vào cửa sổ (tkdnd2).
+  • Detect "đã convert rồi" (nhận diện targetPlatform != "unityads") để
+    cảnh báo user.
+  • Export 1 file .zip "AL+MTG+GG" sau khi convert xong (nén Output/).
+
+
+================================================================================
+                                    HẾT
+================================================================================

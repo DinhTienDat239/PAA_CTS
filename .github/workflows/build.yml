@@ -1,0 +1,67 @@
+name: Build CTS (Windows .exe + macOS .app)
+
+# Chạy khi:
+#   - push lên nhánh main/master
+#   - tạo tag dạng v* (vd. v1.2.0)
+#   - bấm tay trong tab "Actions" (workflow_dispatch)
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # WINDOWS: build CTS.exe (one-file, windowed) bằng chính build.bat của dự án
+  # ---------------------------------------------------------------------------
+  windows-build:
+    name: Build Windows (.exe)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build CTS.exe
+        working-directory: CTS
+        shell: cmd
+        run: build.bat
+
+      - name: Upload artifact CTS.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: CTS-windows-exe
+          path: CTS/dist/CTS.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # MACOS: build CTS.app (windowed bundle) trên runner Apple Silicon (arm64)
+  # ---------------------------------------------------------------------------
+  macos-build:
+    name: Build macOS (.app)
+    runs-on: macos-14  # macos-14 = Apple Silicon (M1); output arm64
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build CTS.app
+        working-directory: CTS
+        run: |
+          chmod +x build_mac.sh
+          ./build_mac.sh
+
+      - name: Upload artifact CTS.app
+        uses: actions/upload-artifact@v4
+        with:
+          name: CTS-macos-app
+          path: CTS/dist/CTS.app
+          if-no-files-found: error

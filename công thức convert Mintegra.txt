@@ -1,0 +1,385 @@
+================================================================================
+                CÔNG THỨC CONVERT MINTEGRA (Mintegral)
+       Phân tích chi tiết quy trình chuyển 1 file Luna Playable HTML
+       từ build "unityads" sang build "mintegral" (Mintegral Network)
+================================================================================
+
+Bản phân tích này được rút ra bằng cách so sánh byte-by-byte giữa:
+  - INPUT : Input/Input.html                       (2.798.175 ký tự, 7 dòng)
+  - OUTPUT: Output/mintegral.html                  (905.297   ký tự, 7 dòng)
+           + Output/assets/scripts.js              (1.555.413 ký tự)
+           + Output/assets/jsons.js                (331.217   ký tự)
+           + Output/assets/blobs.js                (4.416     ký tự)
+
+Tổng số ký tự OUTPUT (905.297 + 1.555.413 + 331.217 + 4.416 = 2.796.343)
+gần đúng tổng INPUT (2.798.175). Phần chênh 1.832 ký tự đến từ 5 phép biến
+đổi ở mục III bên dưới.
+
+================================================================================
+I.  TỔNG QUAN
+================================================================================
+
+File INPUT là một Luna Labs Playable Ad đã được build cho mạng quảng cáo
+"unityads". Tất cả tài nguyên (sounds, jsons, blobs) đã được nén bằng
+decompressString / decompressArrayBuffer và NHÚNG TRỰC TIẾP (inline) vào file
+HTML thông qua 3 khối <script data-startup-only>...</script>.
+
+Mục tiêu của quá trình convert là tạo ra file build chạy cho mạng quảng cáo
+Mintegral. Quá trình gồm 2 nhóm việc chính:
+
+  (A) TÁCH ASSETS RA NGOÀI (Asset Externalization):
+      Lấy 3 khối <script data-startup-only> chứa data nén ra khỏi HTML và
+      lưu thành 3 file JS riêng trong thư mục ./assets/. Trong HTML chỉ giữ
+      lại thẻ <script src="assets/...js" defer data-startup-only></script>.
+
+  (B) THAY THẾ SDK ADAPTER (Platform Re-targeting):
+      - Đổi nhãn target platform từ "unityads" → "mintegral".
+      - Xoá script remote-debug (console.re) của Luna.
+      - Đơn giản hoá lời gọi khởi tạo window.pi.apply(...).
+      - Thay 2 đoạn <script> ở cuối <body> dùng MRAID API bằng 2 đoạn dùng
+        API của Mintegral (window.install, window.gameStart, window.gameEnd,
+        window.gameReady, window.gameClose).
+
+================================================================================
+II. CẤU TRÚC FILE INPUT (giữ nguyên 7 dòng, line-break không đổi)
+================================================================================
+
+  Dòng 1 (216 chars)  : <!DOCTYPE html><html><head>...meta...</meta>
+  Dòng 2 (6.512)      : </head><body><script>polyfill touch</script>
+                        <style>preloader CSS</style>
+                        <div class="preloader">...</div>
+                        <style>application CSS</style>
+                        <script>remote-debug (console.re)</script>   ← XOÁ
+                        <style>...</style>
+                        <script>window.LUCID=..., overrides</script>
+  Dòng 3 (52.145)     : Nhiều <script> chứa engine Unity (Luna), trong đó có
+                        targetPlatform:"unityads"                     ← ĐỔI
+                        window.pi.apply(window,[]||[])                ← ĐỔI
+  Dòng 4 (1.555.452)  : <script data-startup-only>...sounds (mp3 nén)...
+                        ...; window.playgroundBundlesOverrides = {};</script>
+                                                                     ← TÁCH
+  Dòng 5 (331.256)    : <script data-startup-only>window.jsons={}; ...
+                        ...jsons (bundle.json...) nén...</script>    ← TÁCH
+  Dòng 6 (852.567)    : <script data-startup-only>window.blobs={}; ...
+                        ...blob (data.blob) nén...</script>          ← TÁCH
+                        <img id="assets/bundles/-1/-303232.png" ...> ← GIỮ
+                        ...rất nhiều <img> base64 + <script>...      ← GIỮ
+                        <script>MRAID viewability adapter</script>   ← THAY
+                        <script>MRAID install adapter</script></body>← THAY
+  Dòng 7 (21)         : </html></head></html>                        ← GIỮ
+
+Các đoạn "<script data-startup-only>" có thể được nhận diện bằng 1 trong 2
+cách (cả hai đều đúng vì đặc trưng giống nhau trong build pipeline của Luna):
+
+  Cách 1 — theo HEAD của nội dung:
+    • scripts.js : KHÔNG có khởi tạo namespace, mở đầu bằng
+                   "window._compressedAssets = window._compressedAssets || [];"
+    • jsons.js   : mở đầu bằng "window.jsons  = window.jsons  || {};"
+    • blobs.js   : mở đầu bằng "window.blobs  = window.blobs  || {};"
+
+  Cách 2 — theo CALLBACK của lời gọi push():
+    • scripts.js : decompressString(...).then(function( sound ){
+                       window.sounds[ "assets/bundles/-1/<id>.mp3" ] = sound; })
+    • jsons.js   : decompressString(...).then(function( json  ){
+                       window.jsons[ "assets/bundles/-1/<name>.json" ]
+                           = JSON.parse(json); })
+    • blobs.js   : decompressArrayBuffer(...).then(function( blob ){
+                       window.blobs[ "assets/bundles/-1/<name>.blob" ] = blob; })
+
+================================================================================
+III. CÔNG THỨC CONVERT (5 PHÉP BIẾN ĐỔI – step by step)
+================================================================================
+
+⚠ Nguyên tắc CHUNG:
+  • KHÔNG đụng vào dòng 1 và dòng 7.
+  • KHÔNG đụng vào nội dung CSS, ảnh base64 và bất cứ <script> nào KHÔNG nằm
+    trong danh sách 5 transform ở dưới.
+  • Phải GIỮ nguyên thứ tự các dòng, các thẻ và các khoảng trắng đầu dòng
+    (đặc biệt 4 dấu cách "    " trước thẻ <script data-startup-only>).
+  • Encoding: UTF-8 không BOM. Line-ending theo nguyên bản input.
+
+--------------------------------------------------------------------------------
+TRANSFORM 1 — Tách 3 khối <script data-startup-only> ra file ngoài
+--------------------------------------------------------------------------------
+PATTERN cần tìm trong HTML:
+
+    <script data-startup-only>BODY</script>
+
+Trong file input có 3 khối khớp pattern này (lần lượt nằm ở dòng 4, 5, 6).
+Với mỗi khối:
+
+  Bước 1.1: Đọc nội dung BODY (toàn bộ JS bên trong cặp thẻ).
+  Bước 1.2: Phân loại bằng cách kiểm tra prefix của BODY:
+              - Bắt đầu bằng "window._compressedAssets = ..."
+                → loại = "scripts"  → file đích = assets/scripts.js
+              - Bắt đầu bằng "window.jsons = window.jsons || {};"
+                → loại = "jsons"    → file đích = assets/jsons.js
+              - Bắt đầu bằng "window.blobs = window.blobs || {};"
+                → loại = "blobs"    → file đích = assets/blobs.js
+  Bước 1.3: Ghi BODY (nguyên xi, không thêm ký tự gì) vào file đích.
+            UTF-8, không BOM, không thêm newline cuối.
+  Bước 1.4: Thay thế toàn bộ chuỗi "<script data-startup-only>BODY</script>"
+            trong HTML bằng:
+
+                <script src="assets/<TÊN_FILE>" defer data-startup-only></script>
+
+            Lưu ý:
+              • Thêm attribute  src="assets/<TÊN_FILE>"  (đặt NGAY SAU <script).
+              • Thêm attribute  defer                    (đặt SAU src=...).
+              • Giữ nguyên attribute  data-startup-only  (sau defer).
+              • Thứ tự attribute đúng phải là:
+                  <script src="..." defer data-startup-only></script>
+
+GHI CHÚ ĐẶC BIỆT cho khối blobs (dòng 6):
+  Trong file input, khối <script data-startup-only> blobs nằm Ở ĐẦU DÒNG 6
+  và ngay sau </script> của nó là một loạt <img id="assets/bundles/-1/...png"
+  src="data:image/png;base64,...">  ... và các <script> khác. Chỉ thay khối
+  <script data-startup-only>...</script>, mọi thứ phía sau giữ nguyên.
+
+--------------------------------------------------------------------------------
+TRANSFORM 2 — Xoá script remote-debug (console.re) của Luna
+--------------------------------------------------------------------------------
+PATTERN (nằm trong dòng 2 của input, dài đúng 1.268 ký tự):
+
+    <script>(()=>{let e=window.insertYourRemoteDebuggingTokenHere="";
+    if(e){const o=document.createElement("script"); ...console.re/connector.js
+    ... "https://docs.lunalabs.io/docs/playable/ad-networks/remote-debugging"
+    ...})()</script>
+
+Quy tắc:
+  • Định vị bằng marker "insertYourRemoteDebuggingTokenHere".
+  • Mở rộng vùng cắt: bắt đầu từ "<script>(()=>{let e=window.insertYour…"
+    cho tới "</script>" gần nhất TRƯỚC chuỗi "<style>*{-webkit-tap-highlight".
+  • Xoá toàn bộ đoạn này (kể cả 2 thẻ <script>…</script>).
+  • Không thêm bất cứ ký tự thay thế nào – 2 phần xung quanh dán liền lại.
+
+--------------------------------------------------------------------------------
+TRANSFORM 3 — Đổi targetPlatform
+--------------------------------------------------------------------------------
+PATTERN (trong dòng 3 của input):
+
+    targetPlatform:"unityads"
+
+Quy tắc:
+  • Thay chính xác chuỗi  targetPlatform:"unityads"
+    bằng                   targetPlatform:"mintegral"
+  • Chỉ đổi DUY NHẤT lần xuất hiện này (1 lần / toàn file).
+
+--------------------------------------------------------------------------------
+TRANSFORM 4 — Đơn giản hoá lời gọi khởi tạo player
+--------------------------------------------------------------------------------
+PATTERN (trong dòng 3 của input):
+
+    window.pi.apply(window,[]||[])
+
+Quy tắc:
+  • Thay chính xác chuỗi  window.pi.apply(window,[]||[])
+    bằng                   window.pi.apply()
+  • Chỉ 1 lần xuất hiện trong toàn bộ file.
+
+--------------------------------------------------------------------------------
+TRANSFORM 5 — Thay SDK Adapter ở cuối <body> (MRAID → MINTEGRAL)
+--------------------------------------------------------------------------------
+Nằm ở CUỐI dòng 6 (ngay trước </body>).
+
+5.A.  Thay đoạn "Viewability adapter" (MRAID):
+
+  XOÁ nguyên đoạn từ INPUT:
+
+      <script>!function(){var n=!1,e=!1;function t(){return mraid.isViewable()
+      &&"hidden"!==mraid.getState()}function a(){n?t()&&e?(window.dispatchEvent
+      (new Event("luna:resume")),e=!1):t()||e||(window.dispatchEvent
+      (new Event("luna:pause")),e=!0):t()&&(window.dispatchEvent
+      (new Event("luna:start")),n=!0)}function i(){}function d(n){
+      window.dispatchEvent(new Event(n?"luna:unsafe:unmute":"luna:unsafe:mute")
+      )}var r=function(){"undefined"!=typeof mraid?(
+      mraid.removeEventListener("ready",r),
+      mraid.addEventListener("viewableChange",a),
+      mraid.addEventListener("stateChange",a),
+      mraid.addEventListener("orientationchange",i),
+      mraid.addEventListener("audioVolumeChange",d),a()):
+      window.dispatchEvent(new Event("luna:start"))};
+      window.addEventListener("luna:build",(function(){
+      window.pi.logLoaded(),"undefined"!=typeof mraid?
+      "loading"===mraid.getState()?mraid.addEventListener("ready",r):r():
+      window.dispatchEvent(new Event("luna:start"))}))}()</script>
+
+  THAY vào (cũng là 1 đoạn <script>):
+
+      <script>window.gameClose = function () { window.dispatchEvent(new Event(
+      "luna:pause")) }, window.addEventListener("luna:build", (() => {
+      Bridge.ready((() => { Luna.Unity.Playable.InstallFullGame = function () {
+      window.pi.logCta(), window.install && window.install() } })) })),
+      window.addEventListener("luna:ended", (() => { window.gameEnd &&
+      window.gameEnd() }))</script>
+
+5.B.  Thay đoạn "Install / CTA adapter" (MRAID):
+
+  XOÁ nguyên đoạn từ INPUT:
+
+      <script>window.addEventListener("luna:build",(function(){
+      Bridge.ready((function(){
+      Luna.Unity.Playable.InstallFullGame=function(n,i){
+      window.pi.logCta(),
+      n=n||window.$environment.packageConfig.iosLink,
+      i=i||window.$environment.packageConfig.androidLink;
+      const o=/iphone|ipad|ipod|macintosh/i.test(
+      window.navigator.userAgent.toLowerCase())?n:i;
+      "undefined"!=typeof mraid?mraid.open(o):(
+      console.warn("Mraid is not defined"),window.open(o,"_blank"))
+      }}))}))</script>
+
+  THAY vào (1 đoạn <script>):
+
+      <script>window.addEventListener("luna:build", (() => {
+      window.pi.logLoaded(), window.dispatchEvent(new Event(
+      "luna:unsafe:pause")), window.dispatchEvent(new Event(
+      "luna:start")) })), window.addEventListener("luna:started", (() => {
+      window.gameReady && window.gameReady() })), window.gameStart =
+      function () { window.dispatchEvent(new Event("luna:unsafe:resume")) }
+      </script>
+
+Lưu ý:
+  • Hai đoạn THAY phải được ghi đúng vị trí 2 đoạn XOÁ (giữa các <script>
+    khác và </body>). Thứ tự là 5.A đứng TRƯỚC 5.B.
+  • Trong build pipeline thực tế, 2 đoạn thay này là TEMPLATE CỐ ĐỊNH của
+    Mintegral. Có thể giữ y nguyên text như trên (kể cả khoảng trắng "/" "=>"
+    "( ) ").
+
+================================================================================
+IV. THUẬT TOÁN (PSEUDOCODE) ĐỂ TỰ ĐỘNG HOÁ
+================================================================================
+
+Hàm convert( inputHtmlPath, outputDir ):
+
+  1. Đọc toàn bộ file input thành chuỗi `html` (UTF-8, no BOM).
+
+  2. Tìm 3 khối <script data-startup-only>BODY</script> bằng regex:
+        /<script data-startup-only>([\s\S]*?)<\/script>/g
+
+     Với mỗi match (mIndex, mBody):
+       a. typeName ← detectType(mBody):
+            • nếu mBody bắt đầu "window.blobs"  → "blobs"
+            • nếu mBody bắt đầu "window.jsons"  → "jsons"
+            • mặc định (bắt đầu "window._compressedAssets") → "scripts"
+       b. Ghi file:  outputDir/assets/<typeName>.js  ← mBody  (UTF-8, no BOM)
+       c. Thay match trong `html` bằng:
+            <script src="assets/<typeName>.js" defer data-startup-only></script>
+
+  3. Xoá script remote-debug:
+        html ← html.replace(
+          /<script>\(\(\)=>\{let e=window\.insertYourRemoteDebuggingTokenHere[\s\S]*?<\/script>/,
+          ""
+        )
+
+  4. Đổi target platform:
+        html ← html.replace(
+          'targetPlatform:"unityads"',
+          'targetPlatform:"mintegral"'
+        )
+
+  5. Đơn giản hoá apply:
+        html ← html.replace(
+          'window.pi.apply(window,[]||[])',
+          'window.pi.apply()'
+        )
+
+  6. Thay 2 đoạn SDK adapter ở cuối <body>:
+        html ← html.replace( MRAID_VIEWABILITY_SCRIPT,  MINTEGRAL_LIFECYCLE_SCRIPT )
+        html ← html.replace( MRAID_INSTALL_SCRIPT,      MINTEGRAL_INSTALL_SCRIPT   )
+
+     (Tham khảo nguyên văn 4 hằng chuỗi này tại Transform 5 ở trên.)
+
+  7. Tạo thư mục outputDir/assets/ nếu chưa có.
+     Ghi file outputDir/mintegral.html ← html.
+
+  Kết thúc – output gồm:
+     outputDir/
+        mintegral.html
+        assets/
+           scripts.js
+           jsons.js
+           blobs.js
+
+================================================================================
+V. CHECKLIST KIỂM TRA ĐÚNG/SAI SAU KHI CONVERT
+================================================================================
+
+  [ ]  Số dòng của mintegral.html = 7 (giống input).
+  [ ]  Dòng 1 và dòng 7 identical với input.
+  [ ]  Dòng 2 KHÔNG còn chứa "insertYourRemoteDebuggingTokenHere".
+  [ ]  Dòng 3 chứa  targetPlatform:"mintegral"  (không còn "unityads").
+  [ ]  Dòng 3 chứa  window.pi.apply()           (không còn ",[]||[]"  ).
+  [ ]  Dòng 4 chính xác là:
+         '    <script src="assets/scripts.js" defer data-startup-only></script>'
+  [ ]  Dòng 5 chính xác là:
+         '    <script src="assets/jsons.js" defer data-startup-only></script>'
+  [ ]  Dòng 6 bắt đầu bằng:
+         '    <script src="assets/blobs.js" defer data-startup-only></script>'
+  [ ]  Dòng 6 cuối cùng KHÔNG còn từ khoá "mraid" trong 2 <script> cuối.
+  [ ]  Dòng 6 cuối cùng PHẢI có các từ khoá:
+         window.gameClose, window.gameStart, window.gameReady, window.gameEnd,
+         window.install, "luna:started", "luna:ended", "luna:unsafe:pause",
+         "luna:unsafe:resume".
+  [ ]  Thư mục assets/ có đủ 3 file: scripts.js, jsons.js, blobs.js.
+  [ ]  Mỗi file assets/*.js bắt đầu bằng đúng prefix tương ứng:
+         scripts.js → "window._compressedAssets = ..."
+         jsons.js   → "window.jsons = window.jsons || {}; ..."
+         blobs.js   → "window.blobs = window.blobs || {}; ..."
+  [ ]  Tổng độ dài (HTML + 3 file JS) ≈ độ dài file input ± 1.832 ký tự.
+
+================================================================================
+VI. BẢNG ĐỐI CHIẾU NHANH (INPUT vs OUTPUT)
+================================================================================
+
+  Mục                              INPUT (unityads)       OUTPUT (mintegral)
+  --------------------------------------------------------------------------
+  Tên file HTML                    Input.html              mintegral.html
+  Tổng số dòng                     7                       7
+  Dòng 1                           216 ký tự (giống)       216 ký tự
+  Dòng 2                           6.512 ký tự             5.244 ký tự (-1268)
+  Dòng 3                           52.145 ký tự            52.133 ký tự (-12)
+  Dòng 4 (sounds inline)           1.555.452 ký tự         69  ký tự  (script tag)
+  Dòng 5 (jsons inline)            331.256   ký tự         67  ký tự  (script tag)
+  Dòng 6 (blobs+content)           852.567   ký tự         847.535 ký tự
+  Dòng 7                           21 ký tự (giống)        21 ký tự
+  targetPlatform                   "unityads"              "mintegral"
+  window.pi.apply()                apply(window,[]||[])    apply()
+  Remote-debug (console.re)        Có                      Đã bị xoá
+  SDK adapter                      MRAID API               Mintegral API
+  File phụ                         (không)                 assets/scripts.js
+                                                           assets/jsons.js
+                                                           assets/blobs.js
+
+================================================================================
+VII. GỢI Ý TRIỂN KHAI TOOL (Python / Node.js)
+================================================================================
+
+Cấu hình tool nên cho phép:
+  • input_path     : đường dẫn file Input.html
+  • output_dir     : thư mục đầu ra (mặc định ./Output)
+  • target_network : "mintegral" (sau này có thể mở rộng "applovin", "ironsource"…)
+
+Tool nên tách "Mintegral profile" thành 1 file cấu hình JSON gồm:
+  {
+    "remove_remote_debug"      : true,
+    "target_platform_string"   : "mintegral",
+    "pi_apply_replace"         : { "from": "window.pi.apply(window,[]||[])",
+                                   "to":   "window.pi.apply()" },
+    "asset_externalize"        : true,
+    "asset_dir"                : "assets",
+    "sdk_adapter_replacements" : [
+       { "from_marker": "<script>!function(){var n=!1,e=!1;function t(){return mraid.isViewable",
+         "to":   "<script>window.gameClose = function...</script>" },
+       { "from_marker": "<script>window.addEventListener(\"luna:build\",(function(){Bridge.ready((function(){Luna.Unity.Playable.InstallFullGame=function(n,i){",
+         "to":   "<script>window.addEventListener(\"luna:build\", (() => { window.pi.logLoaded()...</script>" }
+    ]
+  }
+
+Như vậy chỉ cần thêm 1 profile mới (ví dụ applovin.json) là tool tự convert
+được cho mạng quảng cáo khác mà không cần sửa code.
+
+================================================================================
+HẾT — File này do tool phân tích tự sinh, dùng làm spec cho việc build
+       lại tool convert Luna Playable sang Mintegral.
+================================================================================
