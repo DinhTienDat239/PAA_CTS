@@ -1,6 +1,6 @@
 ================================================================================
         QUY CHUẨN DỰ ÁN CTS (Convert To SDK)  –  Spec for Agents
-              Phiên bản: 1.2.0 | Cập nhật: 2026-05-13
+              Phiên bản: 1.3.0 | Cập nhật: 2026-07-27
 ================================================================================
 
 Tài liệu này là spec đầy đủ giúp 1 agent mới (hoặc lập trình viên mới) có thể:
@@ -10,10 +10,11 @@ Tài liệu này là spec đầy đủ giúp 1 agent mới (hoặc lập trình 
 
 Đọc cùng tài liệu này (theo thứ tự ưu tiên giảm dần):
   1. công thức convert Mintegra.txt   – Spec chi tiết riêng cho MTG.
-  2. CTS/README.md                    – Hướng dẫn end-user của CTS.
-  3. MTGConverTool/README.md          – Hướng dẫn tool MTG độc lập (cũ).
-  4. ALConvertTool/convert.py         – Source tham chiếu của AL gốc.
-  5. GGConvertTool/main.py            – Source tham chiếu của GG gốc.
+  2. AppLovin-HTML-Bridge-Tool.md     – Spec inject AppLovin Analytics Bridge (AL Tracking).
+  3. CTS/README.md                    – Hướng dẫn end-user của CTS.
+  4. MTGConverTool/README.md          – Hướng dẫn tool MTG độc lập (cũ).
+  5. ALConvertTool/convert.py         – Source tham chiếu của AL gốc.
+  6. GGConvertTool/main.py            – Source tham chiếu của GG gốc.
 
 
 ================================================================================
@@ -62,12 +63,14 @@ Tài liệu này là spec đầy đủ giúp 1 agent mới (hoặc lập trình 
       ├── src/
       │   ├── cts_tool.py                    ← GUI entry point
       │   ├── al_converter.py                ← Core AL   (port từ ALConvertTool)
+      │   ├── al_tracking_bridge.py          ← Core AL Tracking (AppLovin Bridge V3)
       │   ├── mintegra_converter.py          ← Core MTG  (xem công thức convert Mintegra.txt)
       │   ├── gg_converter.py                ← Core GG   (port từ GGConvertTool)
       │   ├── meta_converter.py              ← Core META (Meta / Facebook playable)
       │   └── mlc_converter.py               ← Core MLC  (Moloco playable)
       ├── dist/CTS.exe                       ← bản build sẵn (windowed, one-file)
       ├── build.bat
+      ├── build_mac.sh
       ├── requirements.txt
       └── README.md
 
@@ -240,6 +243,38 @@ LINE  : CRLF.
 
   BƯỚC 3 — Ghi `<input.stem>_AL.html` vào output_dir.
      Encoding UTF-8, line endings CRLF (xem mục 6).
+
+
+4.2b. NETWORK AL TRACKING  (AppLovin Analytics Bridge – tuỳ chọn)
+------------------------------------------------------------------------------
+INPUT : file output của AL (`<basename>_AL.html`), KHÔNG phải HTML gốc.
+OUTPUT:
+  output_dir/<basename>_AL_tracking.html   (bản sao; file AL gốc KHÔNG bị ghi đè)
+LINE  : CRLF.
+DEPENDENCY: chỉ chạy SAU khi AL convert thành công.
+GUI:
+  • Tick "Có Tracking"              → debug_banner=False (production)
+  • Tick "Có Tracking kèm Banner"   → debug_banner=True  (QA overlay)
+  • Banner auto-tick Tracking + AL. Tắt AL → tắt 2 tickbox tracking.
+
+>>> Spec đầy đủ: `AppLovin-HTML-Bridge-Tool.md` <<<
+
+Các bước (module `al_tracking_bridge.py`, hàm `bridge_html`):
+  1. Xoá block `<script>` cũ chứa marker `AL_PLAYABLE_ANALYTICS_BRIDGE*`
+     (tránh patch chồng).
+  2. Inject 1 thẻ `<script>// AL_PLAYABLE_ANALYTICS_BRIDGE_V3 …</script>`
+     ngay trước `</body>`. Thiếu `</body>` → raise ALTrackingBridgeError.
+  3. Production: forward Luna Analytics (long+short name), console.log stub,
+     CTA InstallFullGame, lifecycle DISPLAYED → ALPlayableAnalytics.trackEvent.
+  4. Banner: thêm `showBanner` + hook track/wire/fail (chỉ QA).
+  5. Ghi UTF-8 no BOM, CRLF.
+
+Checklist validate:
+  [ ] Có marker `AL_PLAYABLE_ANALYTICS_BRIDGE_V3`
+  [ ] Script nằm trước `</body>`
+  [ ] File AL gốc (`*_AL.html`) vẫn tồn tại, không đổi
+  [ ] Nếu banner: có `showBanner` và `__al_bridge_banner`
+  [ ] Nếu production: KHÔNG có `showBanner`
 
 
 4.3.  NETWORK GG  (Google)

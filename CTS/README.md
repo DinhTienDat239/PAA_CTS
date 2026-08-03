@@ -5,7 +5,7 @@ HTML trong cùng 1 .exe + 1 cửa sổ Tkinter:
 
 | Network | Mô tả | Input |
 |---------|------|-------|
-| **AL**   | AppLovin – strip script remote-debug, strip script `data-startup-only` chứa URL CDN, strip mọi URL/`href` hard-coded. | File HTML gốc |
+| **AL**   | AppLovin – strip script remote-debug, strip script `data-startup-only` chứa URL CDN, strip mọi URL/`href` hard-coded. Tuỳ chọn **Tracking**: sau khi AL thành công, tạo bản sao `*_AL_tracking.html` inject AppLovin Analytics Bridge (`AL_PLAYABLE_ANALYTICS_BRIDGE_V3`). | File HTML gốc |
 | **MTG**  | Mintegral – tách 3 bundle `<script data-startup-only>` ra `assets/*.js`, xoá remote-debug, đổi `targetPlatform` "unityads" → "mintegral", thay SDK adapter MRAID → Mintegral. | File HTML gốc |
 | **GG**   | Google – đổi `targetPlatform` "mintegral" → "google", thay 2 `<script>` cuối bằng template Google (`window.devicePixelRatio = 2`, `Luna.Unity.Playable.InstallFullGame = window.ExitApi.exit`). | **`mintegral.html` của MTG** (tick GG sẽ tự tick MTG) |
 | **META** | Meta / Facebook – đổi `targetPlatform` "unityads" → "facebook", clean `window.pi.apply(...)` → `window.pi.apply()`, thay 2 `<script>` cuối bằng template `FbPlayableAd.onCTAClick`. | File HTML gốc |
@@ -23,6 +23,7 @@ CTS/
 │   ├── cts_tool.py            # GUI Tkinter – entry point
 │   ├── mintegra_converter.py  # Core MTG  (5 phép biến đổi)
 │   ├── al_converter.py        # Core AL   (port từ ALConvertTool)
+│   ├── al_tracking_bridge.py  # Core AL Tracking (AppLovin Analytics Bridge V3)
 │   ├── gg_converter.py        # Core GG   (port từ GGConvertTool)
 │   ├── meta_converter.py      # Core META (Meta / Facebook playable)
 │   └── mlc_converter.py       # Core MLC  (Moloco playable)
@@ -39,11 +40,17 @@ CTS/
 
 1. Vào `dist/`, double-click **`CTS.exe`**.
 2. Bấm **"Chọn file HTML…"** → chọn file Luna playable gốc (build cho `unityads`).
-3. Tick các network cần convert (mặc định cả 3 đều tick).
+3. Tick các network cần convert (mặc định cả 5 đều tick).
    - **Tick GG sẽ tự động tick MTG** (vì GG cần `mintegral.html` của MTG làm input).
+   - Dưới **AL** có thêm 2 tuỳ chọn (mặc định tắt):
+     - **Có Tracking** → sau AL thành công, tạo thêm `<basename>_AL_tracking.html`
+       (bridge production, không banner).
+     - **Có Tracking kèm Banner** → cùng file `_tracking` nhưng có overlay QA
+       (`showBanner`). Tick Banner sẽ tự tick Có Tracking + AL.
 4. Bấm **"Convert"**.
 5. Thư mục `Output/` được tạo cùng cấp với file input, mỗi network 1 subfolder:
    - `Output/AL/<basename>_AL.html`
+   - `Output/AL/<basename>_AL_tracking.html`  *(nếu tick Tracking)*
    - `Output/MTG/mintegral.html`  +  `Output/MTG/assets/{scripts,jsons,blobs}.js`
    - `Output/GG/index.html`       +  `Output/GG/assets/{scripts,jsons,blobs}.js`
      *(assets được copy y nguyên từ thư mục MTG để playable Google chạy được)*
@@ -63,6 +70,7 @@ python src\cts_tool.py
 ```powershell
 python src\mintegra_converter.py <input.html> [output_dir]       # convert MTG
 python src\al_converter.py        <input.html> [output_dir]       # convert AL
+python src\al_tracking_bridge.py  <al.html> [output_dir] [--banner]  # AL tracking
 python src\gg_converter.py        <mintegral.html> [output_dir]   # convert GG
 python src\meta_converter.py      <input.html> [output_dir]       # convert META
 python src\mlc_converter.py       <input.html> [output_dir]       # convert MLC
@@ -124,6 +132,17 @@ Tải kết quả trong tab **Actions → lần chạy → mục Artifacts**.
    - **Bắt buộc** cả 2 loại phải có ≥1 match.
 2. Strip URL hard-coded khắp file: `"link"` → `""`, `"https?://…"` → `""`, `href="…"` → `href=""`.
 3. Ghi `<basename>_AL.html` vào `Output/AL/`.
+
+### AL Tracking (tuỳ chọn, sau AL)
+Chỉ chạy khi tick **Có Tracking** / **Có Tracking kèm Banner**. Input = file
+`*_AL.html` vừa convert; output = bản sao `*_AL_tracking.html` (file AL gốc
+không bị ghi đè). Spec đầy đủ: `AppLovin-HTML-Bridge-Tool.md`.
+
+1. Xoá block bridge cũ nếu đã có marker `AL_PLAYABLE_ANALYTICS_BRIDGE*`.
+2. Inject `<script>// AL_PLAYABLE_ANALYTICS_BRIDGE_V3 …</script>` ngay trước `</body>`.
+3. Production (Có Tracking): forward Luna Analytics / console stub / CTA →
+   `window.ALPlayableAnalytics.trackEvent(...)`.
+4. Banner (Có Tracking kèm Banner): thêm overlay QA `showBanner` (local/preview).
 
 ### GG (Google) – chạy SAU MTG
 1. Đọc file `Output/MTG/mintegral.html`.

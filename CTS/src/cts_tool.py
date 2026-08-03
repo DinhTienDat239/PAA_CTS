@@ -2,6 +2,8 @@
 
 Tool tích hợp 5 chức năng convert:
   - AL  : Luna Playable -> AppLovin build (strip CDN + remote-debug).
+          Tuỳ chọn: tạo bản sao `_tracking` inject AppLovin Analytics Bridge
+          (Có Tracking / Có Tracking kèm Banner).
   - MTG : Luna Playable (unityads) -> Mintegral build.
   - GG  : Mintegral build  -> Google build (dùng output của MTG làm input).
   - META: Luna Playable (unityads) -> Meta (Facebook) build.
@@ -11,9 +13,12 @@ Cách dùng .exe:
   1. Bấm "Chọn file HTML..." -> chọn file Luna playable gốc.
   2. Tick các network muốn convert (AL / MTG / GG / META / MLC).
      ! Tick GG sẽ tự động tick MTG (vì GG cần output của MTG).
+     ! Dưới AL: tick "Có Tracking" / "Có Tracking kèm Banner" để sinh
+       thêm `<basename>_AL_tracking.html` sau khi AL thành công.
   3. Bấm "Convert".
   4. Trong thư mục Output/, mỗi network 1 subfolder:
        Output/AL/<basename>_AL.html
+       Output/AL/<basename>_AL_tracking.html   (nếu tick Tracking)
        Output/MTG/mintegral.html + Output/MTG/assets/*.js
        Output/GG/index.html      + Output/GG/assets/*.js  (copy từ MTG)
        Output/META/<basename>_Meta.html
@@ -34,6 +39,10 @@ from tkinter import filedialog, messagebox, ttk
 try:
     from mintegra_converter import convert_html as mtg_convert
     from al_converter import convert_html as al_convert, ALConvertError
+    from al_tracking_bridge import (
+        bridge_html as al_bridge,
+        ALTrackingBridgeError,
+    )
     from gg_converter import convert_html as gg_convert, GGConvertError
     from meta_converter import convert_html as meta_convert, MetaConvertError
     from mlc_converter import convert_html as mlc_convert, MLCConvertError
@@ -42,13 +51,17 @@ except ImportError:  # pragma: no cover - fallback khi chạy ngoài src/
     sys.path.insert(0, str(here))
     from mintegra_converter import convert_html as mtg_convert  # type: ignore[no-redef]
     from al_converter import convert_html as al_convert, ALConvertError  # type: ignore[no-redef]
+    from al_tracking_bridge import (  # type: ignore[no-redef]
+        bridge_html as al_bridge,
+        ALTrackingBridgeError,
+    )
     from gg_converter import convert_html as gg_convert, GGConvertError  # type: ignore[no-redef]
     from meta_converter import convert_html as meta_convert, MetaConvertError  # type: ignore[no-redef]
     from mlc_converter import convert_html as mlc_convert, MLCConvertError  # type: ignore[no-redef]
 
 
 APP_TITLE = 'CTS Convert Tool – Luna Playable -> AL / MTG / GG / Meta / MLC'
-APP_VERSION = '1.2.0'
+APP_VERSION = '1.3.0'
 
 # Danh sách network hỗ trợ. Dễ mở rộng sau (chỉ cần thêm 1 dòng).
 NETWORKS: list[tuple[str, str]] = [
@@ -79,6 +92,10 @@ class CTSConvertApp(tk.Tk):
         self._input_path: Path | None = None
         self._output_root: Path | None = None
         self._network_vars: dict[str, tk.BooleanVar] = {}
+        # Tuỳ chọn AL tracking (chỉ áp dụng khi AL convert thành công).
+        self._al_tracking_var = tk.BooleanVar(value=False)
+        self._al_tracking_banner_var = tk.BooleanVar(value=False)
+        self._al_opt_checks: list[ttk.Checkbutton] = []
         self._build_ui()
 
     # ------------------------------------------------------------------ UI
@@ -106,7 +123,8 @@ class CTSConvertApp(tk.Tk):
                 'Chọn 1 file HTML Luna Playable, tick các mạng quảng cáo cần '
                 'convert (AL / MTG / GG / Meta / MLC), rồi bấm "Convert". '
                 'Tool sẽ tạo thư mục "Output/" cùng cấp với file input, '
-                'mỗi network 1 subfolder.'
+                'mỗi network 1 subfolder. Dưới AL có thêm tuỳ chọn Tracking '
+                '(inject AppLovin Analytics Bridge vào bản sao _tracking).'
             ),
             wraplength=780,
             justify='left',
@@ -136,6 +154,27 @@ class CTSConvertApp(tk.Tk):
                 variable=var,
             ).pack(anchor='w', padx=8, pady=2)
 
+            # Tuỳ chọn AL Tracking nằm ngay dưới checkbox AL.
+            if key == 'AL':
+                al_opts = ttk.Frame(net_frame)
+                al_opts.pack(fill='x', padx=28, pady=(0, 4))
+                cb_track = ttk.Checkbutton(
+                    al_opts,
+                    text='Có Tracking  (tạo bản *_AL_tracking.html, production)',
+                    variable=self._al_tracking_var,
+                )
+                cb_track.pack(anchor='w')
+                cb_banner = ttk.Checkbutton(
+                    al_opts,
+                    text=(
+                        'Có Tracking kèm Banner  '
+                        '(bản *_AL_tracking.html + overlay QA)'
+                    ),
+                    variable=self._al_tracking_banner_var,
+                )
+                cb_banner.pack(anchor='w')
+                self._al_opt_checks = [cb_track, cb_banner]
+
         # Hook: tick network có dependency -> auto-tick dependency.
         for key, deps in NETWORK_DEPENDENCIES.items():
             var = self._network_vars[key]
@@ -150,6 +189,16 @@ class CTSConvertApp(tk.Tk):
                             )
 
             var.trace_add('write', _on_toggle)
+
+        # Hook AL: tắt AL → tắt + disable tracking opts; bật lại → enable.
+        # Banner tick → auto-tick Tracking (banner là biến thể của tracking).
+        # Tracking opts tick khi AL tắt → auto-tick AL.
+        self._network_vars['AL'].trace_add('write', self._on_al_network_toggle)
+        self._al_tracking_var.trace_add('write', self._on_al_tracking_toggle)
+        self._al_tracking_banner_var.trace_add(
+            'write', self._on_al_tracking_banner_toggle
+        )
+        self._sync_al_tracking_enabled()
 
         # --- Hàng nút action ------------------------------------------------
         actions = ttk.Frame(self)
@@ -205,6 +254,48 @@ class CTSConvertApp(tk.Tk):
         ).pack(fill='x', side='bottom')
 
         self._log('Sẵn sàng. Bấm "Chọn file HTML…" để bắt đầu.')
+
+    # ------------------------------------------------------------------ AL tracking UI hooks
+    def _sync_al_tracking_enabled(self) -> None:
+        """Enable/disable 2 tickbox tracking theo trạng thái AL."""
+        al_on = self._network_vars['AL'].get()
+        state = 'normal' if al_on else 'disabled'
+        for cb in self._al_opt_checks:
+            cb.configure(state=state)
+        if not al_on:
+            # Tránh cascade log khi đang sync: tắt opts im lặng.
+            if self._al_tracking_banner_var.get():
+                self._al_tracking_banner_var.set(False)
+            if self._al_tracking_var.get():
+                self._al_tracking_var.set(False)
+
+    def _on_al_network_toggle(self, *_args: object) -> None:
+        self._sync_al_tracking_enabled()
+
+    def _on_al_tracking_toggle(self, *_args: object) -> None:
+        if self._al_tracking_var.get():
+            if not self._network_vars['AL'].get():
+                self._network_vars['AL'].set(True)
+                self._log('>> Auto-tick AL (do bật Có Tracking)')
+        else:
+            # Tắt Tracking → tắt Banner (banner phụ thuộc tracking).
+            if self._al_tracking_banner_var.get():
+                self._al_tracking_banner_var.set(False)
+
+    def _on_al_tracking_banner_toggle(self, *_args: object) -> None:
+        if self._al_tracking_banner_var.get():
+            if not self._network_vars['AL'].get():
+                self._network_vars['AL'].set(True)
+                self._log('>> Auto-tick AL (do bật Tracking kèm Banner)')
+            if not self._al_tracking_var.get():
+                self._al_tracking_var.set(True)
+                self._log('>> Auto-tick Có Tracking (do bật Tracking kèm Banner)')
+
+    def _al_tracking_options(self) -> tuple[bool, bool]:
+        """Trả về (want_tracking, debug_banner). Banner chỉ có nghĩa khi tracking bật."""
+        want = bool(self._al_tracking_var.get())
+        banner = bool(self._al_tracking_banner_var.get()) and want
+        return want, banner
 
     # ------------------------------------------------------------------ helpers
     def _log(self, msg: str) -> None:
@@ -294,6 +385,23 @@ class CTSConvertApp(tk.Tk):
                         self._input_path, sub_dir, log=self._log
                     )
                     self._log_al_result(res)
+                    # Sau AL thành công: tuỳ chọn tạo bản sao *_tracking.
+                    want_tracking, debug_banner = self._al_tracking_options()
+                    if want_tracking:
+                        if res.output_html_path is None or not res.output_html_path.exists():
+                            raise ALTrackingBridgeError(
+                                'AL convert không có file output để bridge tracking.'
+                            )
+                        self._log('')
+                        self._log('=== [AL Tracking] bắt đầu ===')
+                        bridge_res = al_bridge(
+                            res.output_html_path,
+                            sub_dir,
+                            log=self._log,
+                            debug_banner=debug_banner,
+                        )
+                        self._log_al_tracking_result(bridge_res)
+                        self._log('=== [AL Tracking] hoàn tất ===')
                 elif key == 'GG':
                     if mtg_html_path is None or not mtg_html_path.exists():
                         raise GGConvertError(
@@ -327,6 +435,7 @@ class CTSConvertApp(tk.Tk):
                 self._log(f'=== [{key}] hoàn tất ===')
             except (
                 ALConvertError,
+                ALTrackingBridgeError,
                 GGConvertError,
                 MetaConvertError,
                 MLCConvertError,
@@ -420,6 +529,26 @@ class CTSConvertApp(tk.Tk):
         )
         self._log(
             f'  Stripped links/href  : {res.stripped_links}'  # type: ignore[attr-defined]
+        )
+        self._log(
+            f'  HTML : {res.output_html_size:,} ký tự -> {res.output_html_path}'  # type: ignore[attr-defined]
+        )
+
+    def _log_al_tracking_result(self, res: object) -> None:
+        self._log('  Transforms áp dụng:')
+        for t in getattr(res, 'transforms_applied', []):
+            self._log('    ✓ ' + t)
+        warns = getattr(res, 'warnings', [])
+        if warns:
+            self._log('  Cảnh báo:')
+            for w in warns:
+                self._log('    ! ' + w)
+        banner = getattr(res, 'debug_banner', False)
+        self._log(
+            f'  Debug banner         : {"ON (QA)" if banner else "OFF (production)"}'
+        )
+        self._log(
+            f'  Removed old bridge   : {getattr(res, "removed_old_bridge", False)}'
         )
         self._log(
             f'  HTML : {res.output_html_size:,} ký tự -> {res.output_html_path}'  # type: ignore[attr-defined]
